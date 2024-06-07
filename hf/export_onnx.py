@@ -1,0 +1,3 @@
+from modeling_bert_vits2 import BertVits2Model
+from configuration_bert_vits2 import BertVits2Config
+
