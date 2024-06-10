@@ -30,7 +30,7 @@ from transformers.modeling_outputs import (
     BaseModelOutput,
     ModelOutput,
 )
-from transformers.models.bert.modeling_bert import BertForPreTraining
+from transformers.models.bert.modeling_bert import BertModel
 from transformers.modeling_utils import PreTrainedModel
 from transformers.utils import add_start_docstrings, add_start_docstrings_to_model_forward, logging, replace_return_docstrings
 from configuration_bert_vits2 import BertVits2Config
@@ -534,7 +534,9 @@ class BertVits2HifiGan(nn.Module):
             layer.remove_weight_norm()
 
     def forward(
-        self, spectrogram: torch.FloatTensor, global_conditioning: Optional[torch.FloatTensor] = None
+        self,
+        spectrogram: torch.FloatTensor,
+        global_conditioning: Optional[torch.FloatTensor] = None
     ) -> torch.FloatTensor:
         r"""
         Converts a spectrogram into a speech waveform.
@@ -611,43 +613,62 @@ class BertVits2TransformerCouplingLayer(nn.Module):
         self.half_channels = config.flow_size // 2
 
         self.conv_pre = nn.Conv1d(self.half_channels, config.hidden_size, 1)
-        self.encoder = BertVits2Encoder(config, kernel_size=5, n_layers=2)
+        self.encoder = BertVits2Encoder(
+            config,
+            kernel_size=5,
+            n_layers=config.prior_encoder_num_flows_layers,
+        )
         self.conv_post = nn.Conv1d(config.hidden_size, self.half_channels, 1)
 
-    def forward(self, input_ids, attension_mask, speaker_embed=None, reverse=False):
-        x0, x1 = torch.split(input_ids, [self.half_channels] * 2, 1)
-        h = self.conv_pre(x0) * attension_mask
-        h = self.encoder(h, attension_mask, speaker_embed=speaker_embed)
-        stats = self.conv_post(h) * attension_mask
-        m, logs = torch.split(stats, [self.half_channels] * 2, 1)
+    def forward(
+        self,
+        inputs,
+        padding_mask,
+        global_conditioning=None,
+        reverse=False,
+        return_dict=True,
+    ):
+        inputs1, inputs2 = torch.split(inputs, [self.half_channels] * 2, 1)
+        hidden_state = self.conv_pre(inputs1) * padding_mask
+        hidden_state = self.encoder(
+            hidden_states=hidden_state.transpose(1, 2),
+            padding_mask=padding_mask.transpose(1, 2),
+            global_conditioning=global_conditioning,
+            return_dict=return_dict
+        )
+        hidden_state = hidden_state.last_hidden_state if return_dict else hidden_state[0]
+        hidden_state = hidden_state.transpose(1, 2)
+        hidden_state = self.conv_post(hidden_state) * padding_mask
+        logs = torch.zeros_like(hidden_state)
 
         if not reverse:
-            x1 = m + x1 * torch.exp(logs) * attension_mask
-            x = torch.cat([x0, x1], 1)
+            inputs1 = hidden_state + inputs1 * torch.exp(logs) * padding_mask
+            x = torch.cat([inputs1, inputs2], 1)
             logdet = torch.sum(logs, [1, 2])
             return x, logdet
         else:
-            x1 = (x1 - m) * torch.exp(-logs) * attension_mask
-            x = torch.cat([x0, x1], 1)
-            return x
+            inputs2 = (inputs2 - hidden_state) * torch.exp(-logs) * padding_mask
+            x = torch.cat([inputs1, inputs2], 1)
+            return x, None
 
 
 class BertVits2TransformerCouplingBlock(nn.Module):
     def __init__(self, config: BertVits2Config):
         super().__init__()
-        self.channels = config.flow_size
-        self.hidden_channels = config.hidden_size
-        self.gin_channels = config.speaker_embedding_size
+        self.flows = nn.ModuleList([
+            BertVits2TransformerCouplingLayer(config) for _ in range(config.prior_encoder_num_flows)
+        ])
 
-        self.flows = nn.ModuleList()
-        for _ in range(4):
-            self.flows.append(BertVits2TransformerCouplingLayer(config))
-
-    def forward(self, x, x_mask, speaker_embed=None, reverse=False):
-        for flow in self.flows:
-            x, _ = flow(x, x_mask, speaker_embed=speaker_embed, reverse=reverse)
-            x = torch.flip(x, [1])
-        return x
+    def forward(self, inputs, padding_mask, global_conditioning=None, reverse=False):
+        if not reverse:
+            for flow in self.flows:
+                inputs, _ = flow(inputs, padding_mask, global_conditioning, reverse=False)
+                inputs = torch.flip(inputs, [1])
+        else:
+            for flow in reversed(self.flows):
+                inputs = torch.flip(inputs, [1])
+                inputs, _ = flow(inputs, padding_mask, global_conditioning, reverse=True)
+        return inputs
 
 
 class BertVits2DilatedDepthSeparableConv(nn.Module):
@@ -918,6 +939,10 @@ class BertVits2Attention(nn.Module):
         self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=config.use_bias)
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=config.use_bias)
 
+        nn.init.xavier_uniform_(self.k_proj.weight)
+        nn.init.xavier_uniform_(self.v_proj.weight)
+        nn.init.xavier_uniform_(self.q_proj.weight)
+
         if self.window_size:
             self.emb_rel_k = nn.Parameter(torch.randn(1, self.window_size * 2 + 1, self.head_dim) * self.scaling)
             self.emb_rel_v = nn.Parameter(torch.randn(1, self.window_size * 2 + 1, self.head_dim) * self.scaling)
@@ -1153,14 +1178,14 @@ class BertVits2Encoder(nn.Module):
         self.layers = nn.ModuleList([BertVits2EncoderLayer(config, kernel_size=kernel_size) for _ in range(n_layers)])
         self.gradient_checkpointing = False
         self.layerdrop = config.layerdrop
-        self.cond_layer_index = config.cond_layer_index
+        self.conditioning_layer_index = config.conditioning_layer_index
 
     def forward(
         self,
         hidden_states: torch.FloatTensor,
         padding_mask: torch.FloatTensor,
         attention_mask: Optional[torch.Tensor] = None,
-        speaker_embeddings: Optional[torch.Tensor] = None,
+        global_conditioning: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
@@ -1184,10 +1209,9 @@ class BertVits2Encoder(nn.Module):
             # add LayerDrop (see https://arxiv.org/abs/1909.11556 for description)
             dropout_probability = np.random.uniform(0, 1)
 
-            if i == self.cond_layer_index and speaker_embeddings is not None:
-                speaker_embeddings = self.speaker_embed_proj(speaker_embeddings.transpose(1, 2))
-                speaker_embeddings = speaker_embeddings.transpose(1, 2)
-                hidden_states = hidden_states + speaker_embeddings
+            if i == self.conditioning_layer_index and global_conditioning is not None:
+                global_conditioning = self.speaker_embed_proj(global_conditioning.transpose(1, 2))
+                hidden_states = hidden_states + global_conditioning
                 hidden_states = hidden_states * padding_mask
 
             skip_the_layer = self.training and (dropout_probability < self.layerdrop)
@@ -1240,8 +1264,11 @@ class BertVits2TextEncoder(nn.Module):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size, config.pad_token_id)
+        nn.init.normal_(self.embed_tokens.weight, 0.0, config.hidden_size**-0.5)
         self.embed_tones = nn.Embedding(config.num_tones, config.hidden_size)
+        nn.init.normal_(self.embed_tones.weight, 0.0, config.hidden_size**-0.5)
         self.embed_languages = nn.Embedding(config.num_languages, config.hidden_size)
+        nn.init.normal_(self.embed_languages.weight, 0.0, config.hidden_size**-0.5)
         self.bert_projs = nn.ModuleList()
         for bert in config.bert_configs:
             self.bert_projs.append(nn.Conv1d(bert.hidden_size, config.hidden_size, 1))
@@ -1262,26 +1289,23 @@ class BertVits2TextEncoder(nn.Module):
         padding_mask: torch.FloatTensor,
         attention_mask: Optional[torch.Tensor] = None,
         bert_embeddings: Optional[List[torch.Tensor]] = None,
-        speaker_embeddings: Optional[torch.Tensor] = None,
+        global_conditioning: Optional[torch.Tensor] = None,
         output_attentions: Optional[bool] = None,
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = True,
     ) -> Union[Tuple[torch.Tensor], BertVits2TextEncoderOutput]:
-        x = (
-            self.embed_tokens(input_ids)
-            + self.embed_tones(tone_ids)
-            + self.embed_languages(language_ids)
-        )
-        for i, proj in self.bert_projs:
-            x = x + proj(bert_embeddings[i]).transpose(1, 2)
-        hidden_states = x * math.sqrt(self.config.hidden_size) # [b, t, h]
-        hidden_states = torch.transpose(hidden_states, 1, -1)  # [b, h, t]
+        x = self.embed_tokens(input_ids)
+        x = x + self.embed_tones(tone_ids)
+        x = x + self.embed_languages(language_ids)
+        for project, inputs in zip(self.bert_projs, bert_embeddings):
+            x = x + project(inputs).transpose(1, 2)
+        hidden_states = x * math.sqrt(self.config.hidden_size)
 
         encoder_outputs = self.encoder(
             hidden_states=hidden_states,
             padding_mask=padding_mask,
             attention_mask=attention_mask,
-            speaker_embeddings=speaker_embeddings,
+            global_conditioning=global_conditioning,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
@@ -1346,7 +1370,7 @@ class BertVits2ReferenceEncoder(nn.Module):
         out = out.contiguous().view(N, T, -1)  # [N, Ty//2^K, 128*n_mels//2^K]
 
         self.gru.flatten_parameters()
-        memory, out = self.gru(out)  # out --- [1, N, 128]
+        _, out = self.gru(out)  # out --- [1, N, 128]
 
         return self.proj(out.squeeze(0))
 
@@ -1444,13 +1468,12 @@ class BertVits2Model(BertVits2PreTrainedModel):
         super().__init__(config)
         self.config = config
         self.text_encoder = BertVits2TextEncoder(config)
-        self.flow = BertVits2ResidualCouplingBlock(config)
         self.decoder = BertVits2HifiGan(config)
 
-        self.bert_encoders = nn.ModuleList([BertForPreTraining(bert_config) for bert_config in config.bert_configs])
+        self.bert_encoders = nn.ModuleList([BertModel(bert_config) for bert_config in config.bert_configs])
         self.bert_proj = nn.ModuleList([nn.Linear(bert_config.hidden_size, config.hidden_size) for bert_config in config.bert_configs])
 
-        self.stochastic_duration_prediction = BertVits2StochasticDurationPredictor(config)
+        self.stochastic_duration_predictor = BertVits2StochasticDurationPredictor(config)
         self.duration_predictor = BertVits2DurationPredictor(config)
 
         if config.num_speakers > 1:
@@ -1482,7 +1505,9 @@ class BertVits2Model(BertVits2PreTrainedModel):
         self,
         input_ids: Optional[torch.Tensor] = None,
         tone_ids: Optional[torch.Tensor] = None,
+        language_ids: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
+        word_to_phoneme: Optional[torch.Tensor] = None,
         bert_input_ids: Optional[torch.Tensor] = None,
         bert_attention_mask: Optional[torch.Tensor] = None,
         language_id: Optional[int] = None,
@@ -1546,21 +1571,27 @@ class BertVits2Model(BertVits2PreTrainedModel):
         if language_id is None:
             language_id = 0
 
-        bert_sequence_length = bert_input_ids.shape[1]
+        if language_ids is None:
+            language_ids = torch.full_like(input_ids, language_id)
+
+        phone_len = input_ids.shape[1]
+
+        is_tuple = isinstance(bert_input_ids, tuple)
 
         bert_embeddings = [
-            enc(input_ids=bert_input_ids, attention_mask=bert_attention_mask).last_hidden_state if i == language_id
-            else torch.zeros(batch_size, bert_sequence_length, enc.config.hidden_size, device=self.device)
+            self.bert_features(i, bert_input_ids, bert_attention_mask, word_to_phoneme) if i == language_id and not is_tuple
+            else torch.zeros(batch_size, enc.config.hidden_size, phone_len, device=self.device)
             for i, enc in enumerate(self.bert_encoders)
         ]
 
         text_encoder_output = self.text_encoder(
             input_ids=input_ids,
             tone_ids=tone_ids,
+            language_ids=language_ids,
             padding_mask=input_padding_mask,
             attention_mask=attention_mask,
             bert_embeddings=bert_embeddings,
-            speaker_embeddings=speaker_embeddings,
+            global_conditioning=speaker_embeddings,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
@@ -1572,15 +1603,19 @@ class BertVits2Model(BertVits2PreTrainedModel):
         prior_log_variances = text_encoder_output[2] if not return_dict else text_encoder_output.prior_log_variances
 
         log_duration = \
-            self.stochastic_duration_prediction(
+            self.stochastic_duration_predictor(
                 hidden_states,
                 input_padding_mask,
-                speaker_embeddings,
+                global_conditioning=speaker_embeddings,
                 reverse=True,
                 noise_scale=self.noise_scale_duration,
             ) * self.stochastic_duration_prediction_ratio + \
-            self.duration_predictor(hidden_states, input_padding_mask, speaker_embeddings) * (1.0 - self.stochastic_duration_prediction_ratio)
-
+            self.duration_predictor(
+                hidden_states,
+                input_padding_mask,
+                global_conditioning=speaker_embeddings
+            ) * (1.0 - self.stochastic_duration_prediction_ratio)
+    
         length_scale = 1.0 / self.speaking_rate
         duration = torch.ceil(torch.exp(log_duration) * input_padding_mask * length_scale)
         predicted_lengths = torch.clamp_min(torch.sum(duration, [1, 2]), 1).long()
@@ -1605,10 +1640,10 @@ class BertVits2Model(BertVits2PreTrainedModel):
         prior_log_variances = torch.matmul(attn.squeeze(1), prior_log_variances).transpose(1, 2)
 
         prior_latents = prior_means + torch.randn_like(prior_means) * torch.exp(prior_log_variances) * self.noise_scale
-        latents = self.flow(prior_latents, output_padding_mask, speaker_embeddings, reverse=True)
+        latents = self.flow(prior_latents, output_padding_mask, global_conditioning=speaker_embeddings, reverse=True)
 
         spectrogram = latents * output_padding_mask
-        waveform = self.decoder(spectrogram, speaker_embeddings)
+        waveform = self.decoder(spectrogram, global_conditioning=speaker_embeddings)
         waveform = waveform.squeeze(1)
         sequence_lengths = predicted_lengths * np.prod(self.config.upsample_rates)
 
@@ -1623,3 +1658,17 @@ class BertVits2Model(BertVits2PreTrainedModel):
             hidden_states=text_encoder_output.hidden_states,
             attentions=text_encoder_output.attentions,
         )
+
+    def bert_features(self, index, input_ids, attention_mask, word2phone):
+        is_tuple = isinstance(input_ids, tuple)
+        if is_tuple:
+            input_ids = input_ids[index]
+            attention_mask = attention_mask[index]
+        bert_model = self.bert_encoders[index]
+        features = bert_model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True).hidden_states
+        x = torch.cat(features[-3:-2], dim=-1)
+        batch_size, _, hidden_dim = x.shape
+        x = x.flatten(0, 1)
+        w2p_flattened = word2phone.flatten()
+        phone_level_feature = x.repeat_interleave(w2p_flattened, dim=0)
+        return phone_level_feature.reshape(batch_size, -1, hidden_dim).transpose(1, 2)

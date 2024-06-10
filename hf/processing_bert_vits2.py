@@ -13,37 +13,63 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """
-Processor class for Bark
+Processor class for Bert VITS2
 """
 
-import json
 import os
 from typing import Optional, Dict
+import re
 
-import numpy as np
-
-from transformers.feature_extraction_utils import BatchFeature
+from transformers.tokenization_utils_base import BatchEncoding
 from transformers.processing_utils import ProcessorMixin
 from transformers.utils import logging
 from transformers.utils.hub import get_file_from_repo
-from transformers import AutoTokenizer, PreTrainedTokenizer
-import transformers
+from transformers import AutoTokenizer, PreTrainedTokenizer, TOKENIZER_MAPPING
 
+# inject BertVits2Tokenizer
+import transformers
+from tokenization_bert_vits2 import BertVits2Tokenizer
+transformers.BertVits2Tokenizer = BertVits2Tokenizer
+TOKENIZER_MAPPING.register("bert_vits2", "BertVits2Tokenizer")
 
 logger = logging.get_logger(__name__)
 
-class PreTrainedTokenizerDict(dict):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+def chinese_number_to_words(text):
+    indents = [
+        "十",
+        "百",
+        "千",
+    ]
+    out = ""
+    if text[0] == "-":
+        out += "負"
+        text = text[1:]
+    elif text[0] == "+":
+        out += "正"
+        text = text[1:]
+    if "." in text:
+        integer, decimal = text.split(".")
+        out += chinese_number_to_words(integer)
+        out += "點"
+        for c in decimal:
+            out += chinese_number_to_words(c)
+        return out
+    for i, c in enumerate(text):
+        if c == ",":
+            pass
+        else:
+            if c == '0' and out[-1] in indents:
+                continue
+            if c == '1' and i == len(text) - 2 and len(text) == 2:
+                c = ""
+            if c:
+                c = "零一二三四五六七八久"[int(c)]
+            out += c
+            # add 千百十
+            if i < len(text) - 1:
+                out += indents[len(text) - i - 2]
+    return out
 
-class AutoTokenizerDict(PreTrainedTokenizerDict):
-    def from_pretrained(models, *args, **kwargs):
-        return AutoTokenizerDict({
-            k: AutoTokenizer.from_pretrained(v, *args, **kwargs) for k, v in models.items()
-        })
-
-transformers.AutoTokenizerDict = AutoTokenizerDict
-transformers.PreTrainedTokenizerDict = PreTrainedTokenizerDict
 
 class BertVits2Processor(ProcessorMixin):
     r"""
@@ -58,17 +84,26 @@ class BertVits2Processor(ProcessorMixin):
     """
 
     tokenizer_class = "AutoTokenizer"
-    bert_tokenizers_class = "AutoTokenizerDict"
-    attributes = ["tokenizer", "bert_tokenizers"]
+    attributes = ["tokenizer"]
 
-    preset_shape = {
-        "semantic_prompt": 1,
-        "coarse_prompt": 2,
-        "fine_prompt": 2,
-    }
+    def __init__(self, tokenizer: PreTrainedTokenizer, bert_tokenizers: Dict[str, PreTrainedTokenizer]):
+        super().__init__(tokenizer)
+        self.bert_tokenizers = bert_tokenizers
 
-    def __init__(self, tokenizer: PreTrainedTokenizer, bert_tokenizers: PreTrainedTokenizerDict):
-        super().__init__(tokenizer, bert_tokenizers)
+    def preprocess_stage1(self, text, language=None):
+        # normalize punctuation
+        text = text.replace("，", ",").replace("。", ".").replace("？", "?").replace("！", "!").replace("...", "…")
+        # normalize whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+        # convert number to words
+        if language == "zh":
+            text = re.sub(r"[+-]?\d+", lambda x: chinese_number_to_words(x.group()), text)
+        return text
+
+    def preprocess_stage2(self, text, language=None):
+        # normalize whitespace
+        text = re.sub(r"\s", 'SP', text).strip()
+        return text
 
     def __call__(
         self,
@@ -76,7 +111,7 @@ class BertVits2Processor(ProcessorMixin):
         language=None,
         return_tensors="pt",
         max_length=256,
-        add_special_tokens=False,
+        add_special_tokens=True,
         return_attention_mask=True,
         padding="longest",
         **kwargs,
@@ -103,8 +138,19 @@ class BertVits2Processor(ProcessorMixin):
             `tokenizer` and a [`BatchFeature`], i.e the voice preset with the right tensors type.
         """
 
+        if language is None:
+            raise ValueError("The language argument is required for BertVits2Processor.")
+        
+        if language not in self.bert_tokenizers:
+            raise ValueError(f"Language '{language}' not supported by BertVits2Processor.")
+        
+        bert_text = self.preprocess_stage1(text, language)
+        g2p_text = self.preprocess_stage2(bert_text, language)
+
+        phone_text, tone_ids, lang_ids, word2ph = self.tokenizer.convert_g2p(g2p_text, language, add_special_tokens)
+
         encoded_text = self.tokenizer(
-            text,
+            phone_text,
             return_tensors=return_tensors,
             padding=padding,
             max_length=max_length,
@@ -114,18 +160,56 @@ class BertVits2Processor(ProcessorMixin):
 
         bert_tokenizer = self.bert_tokenizers[language]
         bert_encoded_text = bert_tokenizer(
-            text,
+            bert_text,
             return_tensors=return_tensors,
             padding=padding,
             max_length=max_length,
             return_attention_mask=return_attention_mask,
             add_special_tokens=add_special_tokens,
+            return_token_type_ids=False,
             **kwargs,
         )
 
-        return {
-            "input_ids": encoded_text["input_ids"],
-            "attention_mask": encoded_text["attention_mask"],
-            "bert_input_ids": bert_encoded_text["input_ids"],
-            "bert_attention_mask": bert_encoded_text["attention_mask"],
+        return BatchEncoding({
+            **encoded_text,
+            **{ f"bert_{k}": v for k, v in bert_encoded_text.items() },
+            "tone_ids": [tone_ids],
+            "language_ids": [lang_ids],
+            "word_to_phoneme": [word2ph],
+        }, tensor_type=return_tensors)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        args = cls._get_arguments_from_pretrained(pretrained_model_name_or_path, **kwargs)
+        bert_tokenizers = {
+            language: AutoTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder=f"bert_{language}")
+            for language in args[0].languages
         }
+        args.append(bert_tokenizers)
+        return cls(*args)
+
+    def save_pretrained(
+        self,
+        save_directory,
+        **kwargs,
+    ):
+        """
+        Save the processor to the `save_directory` directory. If the processor has been created from a
+        repository, the method will push the model to the `save_directory` repository.
+
+        Args:
+            save_directory (`str`):
+                Directory where the processor will be saved.
+            push_to_hub (`bool`, `optional`, defaults to `False`):
+                Whether or not to push the model to the Hugging Face Hub after saving it.
+            kwargs:
+                Additional attributes to be saved with the processor.
+        """
+        os.makedirs(save_directory, exist_ok=True)
+        for language, tokenizer in self.bert_tokenizers.items():
+            tokenizer.save_pretrained(os.path.join(save_directory, f"bert_{language}"))
+        bert_tokenizers = self.bert_tokenizers
+        self.bert_tokenizers = {language: f"bert_{language}" for language in self.bert_tokenizers}
+        outputs = super().save_pretrained(save_directory, **kwargs)
+        self.bert_tokenizers = bert_tokenizers
+        return outputs

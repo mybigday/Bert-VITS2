@@ -26,7 +26,7 @@ from huggingface_hub import hf_hub_download
 from modeling_bert_vits2 import BertVits2Model
 from tokenization_bert_vits2 import BertVits2Tokenizer
 from configuration_bert_vits2 import BertVits2Config
-from processing_bert_vits2 import BertVits2Processor, AutoTokenizerDict, PreTrainedTokenizerDict
+from processing_bert_vits2 import BertVits2Processor
 from transformers import BertTokenizer, BertModel, BertConfig
 from transformers import logging
 
@@ -39,6 +39,9 @@ MAPPING_TEXT_ENCODER = {
     "enc_p.bert_proj": "text_encoder.bert_projs.0",
     "enc_p.ja_bert_proj": "text_encoder.bert_projs.1", # len(bert) >= 2
     "enc_p.en_bert_proj": "text_encoder.bert_projs.2", # len(bert) >= 3
+    "enc_p.tone_emb": "text_encoder.embed_tones",
+    "enc_p.language_emb": "text_encoder.embed_languages",
+    "enc_p.encoder.spk_emb_linear": "text_encoder.encoder.speaker_embed_proj",
     "enc_p.encoder.attn_layers.*.conv_k": "text_encoder.encoder.layers.*.attention.k_proj",
     "enc_p.encoder.attn_layers.*.conv_v": "text_encoder.encoder.layers.*.attention.v_proj",
     "enc_p.encoder.attn_layers.*.conv_q": "text_encoder.encoder.layers.*.attention.q_proj",
@@ -53,70 +56,80 @@ MAPPING_TEXT_ENCODER = {
     "enc_p.encoder.norm_layers_2.*.beta": "text_encoder.encoder.layers.*.final_layer_norm.bias",
     "enc_p.proj": "text_encoder.project",
 }
-MAPPING_STOCHASTIC_DURATION_PREDICTOR = {
-    "dp.pre": "duration_predictor.conv_pre",
-    "dp.proj": "duration_predictor.conv_proj",
-    "dp.convs.convs_sep.*": "duration_predictor.conv_dds.convs_dilated.*",
-    "dp.convs.convs_1x1.*": "duration_predictor.conv_dds.convs_pointwise.*",
-    "dp.convs.norms_1.*.gamma": "duration_predictor.conv_dds.norms_1.*.weight",
-    "dp.convs.norms_1.*.beta": "duration_predictor.conv_dds.norms_1.*.bias",
-    "dp.convs.norms_2.*.gamma": "duration_predictor.conv_dds.norms_2.*.weight",
-    "dp.convs.norms_2.*.beta": "duration_predictor.conv_dds.norms_2.*.bias",
-    "dp.flows.0.logs": "duration_predictor.flows.0.log_scale",
-    "dp.flows.0.m": "duration_predictor.flows.0.translate",
-    "dp.flows.*.pre": "duration_predictor.flows.*.conv_pre",
-    "dp.flows.*.proj": "duration_predictor.flows.*.conv_proj",
-    "dp.flows.*.convs.convs_1x1.0": "duration_predictor.flows.*.conv_dds.convs_pointwise.0",
-    "dp.flows.*.convs.convs_1x1.1": "duration_predictor.flows.*.conv_dds.convs_pointwise.1",
-    "dp.flows.*.convs.convs_1x1.2": "duration_predictor.flows.*.conv_dds.convs_pointwise.2",
-    "dp.flows.*.convs.convs_sep.0": "duration_predictor.flows.*.conv_dds.convs_dilated.0",
-    "dp.flows.*.convs.convs_sep.1": "duration_predictor.flows.*.conv_dds.convs_dilated.1",
-    "dp.flows.*.convs.convs_sep.2": "duration_predictor.flows.*.conv_dds.convs_dilated.2",
-    "dp.flows.*.convs.norms_1.0.gamma": "duration_predictor.flows.*.conv_dds.norms_1.0.weight",
-    "dp.flows.*.convs.norms_1.0.beta": "duration_predictor.flows.*.conv_dds.norms_1.0.bias",
-    "dp.flows.*.convs.norms_1.1.gamma": "duration_predictor.flows.*.conv_dds.norms_1.1.weight",
-    "dp.flows.*.convs.norms_1.1.beta": "duration_predictor.flows.*.conv_dds.norms_1.1.bias",
-    "dp.flows.*.convs.norms_1.2.gamma": "duration_predictor.flows.*.conv_dds.norms_1.2.weight",
-    "dp.flows.*.convs.norms_1.2.beta": "duration_predictor.flows.*.conv_dds.norms_1.2.bias",
-    "dp.flows.*.convs.norms_2.0.gamma": "duration_predictor.flows.*.conv_dds.norms_2.0.weight",
-    "dp.flows.*.convs.norms_2.0.beta": "duration_predictor.flows.*.conv_dds.norms_2.0.bias",
-    "dp.flows.*.convs.norms_2.1.gamma": "duration_predictor.flows.*.conv_dds.norms_2.1.weight",
-    "dp.flows.*.convs.norms_2.1.beta": "duration_predictor.flows.*.conv_dds.norms_2.1.bias",
-    "dp.flows.*.convs.norms_2.2.gamma": "duration_predictor.flows.*.conv_dds.norms_2.2.weight",
-    "dp.flows.*.convs.norms_2.2.beta": "duration_predictor.flows.*.conv_dds.norms_2.2.bias",
-    "dp.post_pre": "duration_predictor.post_conv_pre",
-    "dp.post_proj": "duration_predictor.post_conv_proj",
-    "dp.post_convs.convs_sep.*": "duration_predictor.post_conv_dds.convs_dilated.*",
-    "dp.post_convs.convs_1x1.*": "duration_predictor.post_conv_dds.convs_pointwise.*",
-    "dp.post_convs.norms_1.*.gamma": "duration_predictor.post_conv_dds.norms_1.*.weight",
-    "dp.post_convs.norms_1.*.beta": "duration_predictor.post_conv_dds.norms_1.*.bias",
-    "dp.post_convs.norms_2.*.gamma": "duration_predictor.post_conv_dds.norms_2.*.weight",
-    "dp.post_convs.norms_2.*.beta": "duration_predictor.post_conv_dds.norms_2.*.bias",
-    "dp.post_flows.0.logs": "duration_predictor.post_flows.0.log_scale",
-    "dp.post_flows.0.m": "duration_predictor.post_flows.0.translate",
-    "dp.post_flows.*.pre": "duration_predictor.post_flows.*.conv_pre",
-    "dp.post_flows.*.proj": "duration_predictor.post_flows.*.conv_proj",
-    "dp.post_flows.*.convs.convs_1x1.0": "duration_predictor.post_flows.*.conv_dds.convs_pointwise.0",
-    "dp.post_flows.*.convs.convs_1x1.1": "duration_predictor.post_flows.*.conv_dds.convs_pointwise.1",
-    "dp.post_flows.*.convs.convs_1x1.2": "duration_predictor.post_flows.*.conv_dds.convs_pointwise.2",
-    "dp.post_flows.*.convs.convs_sep.0": "duration_predictor.post_flows.*.conv_dds.convs_dilated.0",
-    "dp.post_flows.*.convs.convs_sep.1": "duration_predictor.post_flows.*.conv_dds.convs_dilated.1",
-    "dp.post_flows.*.convs.convs_sep.2": "duration_predictor.post_flows.*.conv_dds.convs_dilated.2",
-    "dp.post_flows.*.convs.norms_1.0.gamma": "duration_predictor.post_flows.*.conv_dds.norms_1.0.weight",
-    "dp.post_flows.*.convs.norms_1.0.beta": "duration_predictor.post_flows.*.conv_dds.norms_1.0.bias",
-    "dp.post_flows.*.convs.norms_1.1.gamma": "duration_predictor.post_flows.*.conv_dds.norms_1.1.weight",
-    "dp.post_flows.*.convs.norms_1.1.beta": "duration_predictor.post_flows.*.conv_dds.norms_1.1.bias",
-    "dp.post_flows.*.convs.norms_1.2.gamma": "duration_predictor.post_flows.*.conv_dds.norms_1.2.weight",
-    "dp.post_flows.*.convs.norms_1.2.beta": "duration_predictor.post_flows.*.conv_dds.norms_1.2.bias",
-    "dp.post_flows.*.convs.norms_2.0.gamma": "duration_predictor.post_flows.*.conv_dds.norms_2.0.weight",
-    "dp.post_flows.*.convs.norms_2.0.beta": "duration_predictor.post_flows.*.conv_dds.norms_2.0.bias",
-    "dp.post_flows.*.convs.norms_2.1.gamma": "duration_predictor.post_flows.*.conv_dds.norms_2.1.weight",
-    "dp.post_flows.*.convs.norms_2.1.beta": "duration_predictor.post_flows.*.conv_dds.norms_2.1.bias",
-    "dp.post_flows.*.convs.norms_2.2.gamma": "duration_predictor.post_flows.*.conv_dds.norms_2.2.weight",
-    "dp.post_flows.*.convs.norms_2.2.beta": "duration_predictor.post_flows.*.conv_dds.norms_2.2.bias",
+MAPPING_DURATION_PREDICTOR = {
+    "dp.conv_1": "duration_predictor.conv_1",
+    "dp.norm_1.gamma": "duration_predictor.norm_1.weight",
+    "dp.norm_1.beta": "duration_predictor.norm_1.bias",
+    "dp.conv_2": "duration_predictor.conv_2",
+    "dp.norm_2.gamma": "duration_predictor.norm_2.weight",
+    "dp.norm_2.beta": "duration_predictor.norm_2.bias",
+    "dp.proj": "duration_predictor.proj",
     "dp.cond": "duration_predictor.cond",  # num_speakers > 1
 }
-MAPPING_FLOW = {
+MAPPING_STOCHASTIC_DURATION_PREDICTOR = {
+    "sdp.pre": "stochastic_duration_predictor.conv_pre",
+    "sdp.proj": "stochastic_duration_predictor.conv_proj",
+    "sdp.convs.convs_sep.*": "stochastic_duration_predictor.conv_dds.convs_dilated.*",
+    "sdp.convs.convs_1x1.*": "stochastic_duration_predictor.conv_dds.convs_pointwise.*",
+    "sdp.convs.norms_1.*.gamma": "stochastic_duration_predictor.conv_dds.norms_1.*.weight",
+    "sdp.convs.norms_1.*.beta": "stochastic_duration_predictor.conv_dds.norms_1.*.bias",
+    "sdp.convs.norms_2.*.gamma": "stochastic_duration_predictor.conv_dds.norms_2.*.weight",
+    "sdp.convs.norms_2.*.beta": "stochastic_duration_predictor.conv_dds.norms_2.*.bias",
+    "sdp.flows.0.logs": "stochastic_duration_predictor.flows.0.log_scale",
+    "sdp.flows.0.m": "stochastic_duration_predictor.flows.0.translate",
+    "sdp.flows.*.pre": "stochastic_duration_predictor.flows.*.conv_pre",
+    "sdp.flows.*.proj": "stochastic_duration_predictor.flows.*.conv_proj",
+    "sdp.flows.*.convs.convs_1x1.0": "stochastic_duration_predictor.flows.*.conv_dds.convs_pointwise.0",
+    "sdp.flows.*.convs.convs_1x1.1": "stochastic_duration_predictor.flows.*.conv_dds.convs_pointwise.1",
+    "sdp.flows.*.convs.convs_1x1.2": "stochastic_duration_predictor.flows.*.conv_dds.convs_pointwise.2",
+    "sdp.flows.*.convs.convs_sep.0": "stochastic_duration_predictor.flows.*.conv_dds.convs_dilated.0",
+    "sdp.flows.*.convs.convs_sep.1": "stochastic_duration_predictor.flows.*.conv_dds.convs_dilated.1",
+    "sdp.flows.*.convs.convs_sep.2": "stochastic_duration_predictor.flows.*.conv_dds.convs_dilated.2",
+    "sdp.flows.*.convs.norms_1.0.gamma": "stochastic_duration_predictor.flows.*.conv_dds.norms_1.0.weight",
+    "sdp.flows.*.convs.norms_1.0.beta": "stochastic_duration_predictor.flows.*.conv_dds.norms_1.0.bias",
+    "sdp.flows.*.convs.norms_1.1.gamma": "stochastic_duration_predictor.flows.*.conv_dds.norms_1.1.weight",
+    "sdp.flows.*.convs.norms_1.1.beta": "stochastic_duration_predictor.flows.*.conv_dds.norms_1.1.bias",
+    "sdp.flows.*.convs.norms_1.2.gamma": "stochastic_duration_predictor.flows.*.conv_dds.norms_1.2.weight",
+    "sdp.flows.*.convs.norms_1.2.beta": "stochastic_duration_predictor.flows.*.conv_dds.norms_1.2.bias",
+    "sdp.flows.*.convs.norms_2.0.gamma": "stochastic_duration_predictor.flows.*.conv_dds.norms_2.0.weight",
+    "sdp.flows.*.convs.norms_2.0.beta": "stochastic_duration_predictor.flows.*.conv_dds.norms_2.0.bias",
+    "sdp.flows.*.convs.norms_2.1.gamma": "stochastic_duration_predictor.flows.*.conv_dds.norms_2.1.weight",
+    "sdp.flows.*.convs.norms_2.1.beta": "stochastic_duration_predictor.flows.*.conv_dds.norms_2.1.bias",
+    "sdp.flows.*.convs.norms_2.2.gamma": "stochastic_duration_predictor.flows.*.conv_dds.norms_2.2.weight",
+    "sdp.flows.*.convs.norms_2.2.beta": "stochastic_duration_predictor.flows.*.conv_dds.norms_2.2.bias",
+    "sdp.post_pre": "stochastic_duration_predictor.post_conv_pre",
+    "sdp.post_proj": "stochastic_duration_predictor.post_conv_proj",
+    "sdp.post_convs.convs_sep.*": "stochastic_duration_predictor.post_conv_dds.convs_dilated.*",
+    "sdp.post_convs.convs_1x1.*": "stochastic_duration_predictor.post_conv_dds.convs_pointwise.*",
+    "sdp.post_convs.norms_1.*.gamma": "stochastic_duration_predictor.post_conv_dds.norms_1.*.weight",
+    "sdp.post_convs.norms_1.*.beta": "stochastic_duration_predictor.post_conv_dds.norms_1.*.bias",
+    "sdp.post_convs.norms_2.*.gamma": "stochastic_duration_predictor.post_conv_dds.norms_2.*.weight",
+    "sdp.post_convs.norms_2.*.beta": "stochastic_duration_predictor.post_conv_dds.norms_2.*.bias",
+    "sdp.post_flows.0.logs": "stochastic_duration_predictor.post_flows.0.log_scale",
+    "sdp.post_flows.0.m": "stochastic_duration_predictor.post_flows.0.translate",
+    "sdp.post_flows.*.pre": "stochastic_duration_predictor.post_flows.*.conv_pre",
+    "sdp.post_flows.*.proj": "stochastic_duration_predictor.post_flows.*.conv_proj",
+    "sdp.post_flows.*.convs.convs_1x1.0": "stochastic_duration_predictor.post_flows.*.conv_dds.convs_pointwise.0",
+    "sdp.post_flows.*.convs.convs_1x1.1": "stochastic_duration_predictor.post_flows.*.conv_dds.convs_pointwise.1",
+    "sdp.post_flows.*.convs.convs_1x1.2": "stochastic_duration_predictor.post_flows.*.conv_dds.convs_pointwise.2",
+    "sdp.post_flows.*.convs.convs_sep.0": "stochastic_duration_predictor.post_flows.*.conv_dds.convs_dilated.0",
+    "sdp.post_flows.*.convs.convs_sep.1": "stochastic_duration_predictor.post_flows.*.conv_dds.convs_dilated.1",
+    "sdp.post_flows.*.convs.convs_sep.2": "stochastic_duration_predictor.post_flows.*.conv_dds.convs_dilated.2",
+    "sdp.post_flows.*.convs.norms_1.0.gamma": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_1.0.weight",
+    "sdp.post_flows.*.convs.norms_1.0.beta": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_1.0.bias",
+    "sdp.post_flows.*.convs.norms_1.1.gamma": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_1.1.weight",
+    "sdp.post_flows.*.convs.norms_1.1.beta": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_1.1.bias",
+    "sdp.post_flows.*.convs.norms_1.2.gamma": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_1.2.weight",
+    "sdp.post_flows.*.convs.norms_1.2.beta": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_1.2.bias",
+    "sdp.post_flows.*.convs.norms_2.0.gamma": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_2.0.weight",
+    "sdp.post_flows.*.convs.norms_2.0.beta": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_2.0.bias",
+    "sdp.post_flows.*.convs.norms_2.1.gamma": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_2.1.weight",
+    "sdp.post_flows.*.convs.norms_2.1.beta": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_2.1.bias",
+    "sdp.post_flows.*.convs.norms_2.2.gamma": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_2.2.weight",
+    "sdp.post_flows.*.convs.norms_2.2.beta": "stochastic_duration_predictor.post_flows.*.conv_dds.norms_2.2.bias",
+    "sdp.cond": "stochastic_duration_predictor.cond",  # num_speakers > 1
+}
+MAPPING_RESIDUAL_FLOW = {
     "flow.flows.*.pre": "flow.flows.*.conv_pre",
     "flow.flows.*.enc.in_layers.0": "flow.flows.*.wavenet.in_layers.0",
     "flow.flows.*.enc.in_layers.1": "flow.flows.*.wavenet.in_layers.1",
@@ -129,12 +142,31 @@ MAPPING_FLOW = {
     "flow.flows.*.enc.cond_layer": "flow.flows.*.wavenet.cond_layer",  # num_speakers > 1
     "flow.flows.*.post": "flow.flows.*.conv_post",
 }
+MAPPING_TRANSFORMER_FLOW = {
+    "flow.flows.*.pre": "flow.flows.*.conv_pre",
+    "flow.flows.*.enc.spk_emb_linear": "flow.flows.*.encoder.speaker_embed_proj",
+    "flow.flows.*.post": "flow.flows.*.conv_post",
+}
+for i in range(6): # default use 6 attention layers
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.attn_layers.{i}.conv_k"] = f"flow.flows.*.encoder.layers.{i}.attention.k_proj"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.attn_layers.{i}.conv_v"] = f"flow.flows.*.encoder.layers.{i}.attention.v_proj"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.attn_layers.{i}.conv_q"] = f"flow.flows.*.encoder.layers.{i}.attention.q_proj"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.attn_layers.{i}.conv_o"] = f"flow.flows.*.encoder.layers.{i}.attention.out_proj"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.attn_layers.{i}.emb_rel_k"] = f"flow.flows.*.encoder.layers.{i}.attention.emb_rel_k"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.attn_layers.{i}.emb_rel_v"] = f"flow.flows.*.encoder.layers.{i}.attention.emb_rel_v"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.norm_layers_1.{i}.gamma"] = f"flow.flows.*.encoder.layers.{i}.layer_norm.weight"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.norm_layers_1.{i}.beta"] = f"flow.flows.*.encoder.layers.{i}.layer_norm.bias"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.ffn_layers.{i}.conv_1"] = f"flow.flows.*.encoder.layers.{i}.feed_forward.conv_1"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.ffn_layers.{i}.conv_2"] = f"flow.flows.*.encoder.layers.{i}.feed_forward.conv_2"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.norm_layers_2.{i}.gamma"] = f"flow.flows.*.encoder.layers.{i}.final_layer_norm.weight"
+    MAPPING_TRANSFORMER_FLOW[f"flow.flows.*.enc.norm_layers_2.{i}.beta"] = f"flow.flows.*.encoder.layers.{i}.final_layer_norm.bias"
 MAPPING_GENERATOR = {
     "dec.conv_pre": "decoder.conv_pre",
     "dec.ups.0": "decoder.upsampler.0",
     "dec.ups.1": "decoder.upsampler.1",
     "dec.ups.2": "decoder.upsampler.2",
     "dec.ups.3": "decoder.upsampler.3",
+    "dec.ups.4": "decoder.upsampler.4",
     "dec.resblocks.*.convs1.0": "decoder.resblocks.*.convs1.0",
     "dec.resblocks.*.convs1.1": "decoder.resblocks.*.convs1.1",
     "dec.resblocks.*.convs1.2": "decoder.resblocks.*.convs1.2",
@@ -153,8 +185,8 @@ MAPPING_POSTERIOR_ENCODER = {
 }
 MAPPING = {
     **MAPPING_TEXT_ENCODER,
+    **MAPPING_DURATION_PREDICTOR,
     **MAPPING_STOCHASTIC_DURATION_PREDICTOR,
-    **MAPPING_FLOW,
     **MAPPING_GENERATOR,
     **MAPPING_POSTERIOR_ENCODER,
     "emb_g": "embed_speaker",  # num_speakers > 1
@@ -165,7 +197,11 @@ IGNORE_KEYS = []
 
 def set_recursively(hf_pointer, key, value, full_name, weight_type):
     for attribute in key.split("."):
-        hf_pointer = getattr(hf_pointer, attribute)
+        try:
+            hf_pointer = getattr(hf_pointer, attribute)
+        except AttributeError:
+            print(key, full_name)
+            raise ValueError(f"Attribute {attribute} not found in {full_name}")
 
     if weight_type is not None:
         hf_shape = getattr(hf_pointer, weight_type).shape
@@ -215,6 +251,10 @@ def should_ignore(name, ignore_keys):
             return True
     return False
 
+def replace_with_list(key, indexes):
+    for index in indexes:
+        key = key.replace("*", index, 1)
+    return key
 
 def recursively_load_weights(fairseq_dict, hf_model):
     unused_weights = []
@@ -226,10 +266,6 @@ def recursively_load_weights(fairseq_dict, hf_model):
 
         is_used = False
         for key, mapped_key in MAPPING.items():
-            # filter key liks glob pattern
-            glob_key = key.replace(".", "\.").replace("*", ".*")
-            if re.match(glob_key, name) is None:
-                continue
             if key.endswith(".*"):
                 key = key[:-1]
             elif "*" in key:
@@ -237,37 +273,42 @@ def recursively_load_weights(fairseq_dict, hf_model):
                 if prefix in name and suffix in name:
                     key = suffix
 
-            is_used = True
-            if mapped_key.endswith(".*"):
-                layer_index = name.split(key)[-1].split(".")[0]
-                mapped_key = mapped_key.replace("*", layer_index)
-            elif "*" in mapped_key:
-                layer_index = name.split(key)[0].split(".")[-2]
+            if name.startswith('sdp') and not mapped_key.startswith('stochastic_duration_predictor'):
+                continue
 
-                # remap the layer index since we removed the Flip layers
-                if "flow.flows" in mapped_key:
-                    layer_index = str(int(layer_index) // 2)
-                if "duration_predictor.flows" in mapped_key or "duration_predictor.post_flows" in mapped_key:
-                    layer_index = str(int(layer_index) // 2 + 1)
+            if key in name:
+                is_used = True
+                if mapped_key.endswith(".*"):
+                    layer_index = name.split(key)[-1].split(".")[0]
+                    mapped_key = mapped_key.replace("*", layer_index)
+                elif "*" in mapped_key:
+                    layer_index = name.split(key)[0].split(".")[-2]
 
-                mapped_key = mapped_key.replace("*", layer_index)
-            if "weight_g" in name:
-                weight_type = "weight_g"
-            elif "weight_v" in name:
-                weight_type = "weight_v"
-            elif "bias" in name:
-                weight_type = "bias"
-            elif "weight" in name:
-                weight_type = "weight"
-            elif "running_mean" in name:
-                weight_type = "running_mean"
-            elif "running_var" in name:
-                weight_type = "running_var"
-            elif "num_batches_tracked" in name:
-                weight_type = "num_batches_tracked"
-            else:
-                weight_type = None
-            set_recursively(hf_model, mapped_key, value, name, weight_type)
+                    # remap the layer index since we removed the Flip layers
+                    if "flow.flows" in mapped_key:
+                        layer_index = str(int(layer_index) // 2)
+                    if "duration_predictor.flows" in mapped_key or "duration_predictor.post_flows" in mapped_key:
+                        layer_index = str(int(layer_index) // 2 + 1)
+
+                    mapped_key = mapped_key.replace("*", layer_index)
+                if "weight_g" in name:
+                    weight_type = "weight_g"
+                elif "weight_v" in name:
+                    weight_type = "weight_v"
+                elif "bias" in name:
+                    weight_type = "bias"
+                elif "weight" in name:
+                    weight_type = "weight"
+                elif "running_mean" in name:
+                    weight_type = "running_mean"
+                elif "running_var" in name:
+                    weight_type = "running_var"
+                elif "num_batches_tracked" in name:
+                    weight_type = "num_batches_tracked"
+                else:
+                    weight_type = None
+                set_recursively(hf_model, mapped_key, value, name, weight_type)
+            continue
         if not is_used:
             unused_weights.append(name)
 
@@ -392,7 +433,10 @@ def original_vits_vocab():
         "z",
         "zy",
     ]
-    num_ja_tones = 2
+    # V1.x
+    num_ja_tones = 1
+    # # V2.x
+    # num_ja_tones = 2
     # English
     en_symbols = [
         "aa",
@@ -461,7 +505,12 @@ def convert_checkpoint(
 
     logger.info(f"***Converting model: {checkpoint_path}***")
 
-    config.num_languages = len(language)
+    if language is None:
+        language = ["zh", "ja", "en"]
+        language = language[: len(bert)]
+
+    # official Bert VITS 2 fixed in 3 languages to enbedding
+    config.num_languages = 3
 
     with open(params_path, "r") as f:
         params = json.load(f)
@@ -471,7 +520,7 @@ def convert_checkpoint(
         config.upsample_kernel_sizes = params['model']['upsample_kernel_sizes']
         config.upsample_initial_channel = params['model']['upsample_initial_channel']
         config.hidden_size = params['model']['hidden_channels']
-        config.duration_predictor_filter_channels = params['model']['filter_channels']
+        config.ffn_dim = params['model']['filter_channels']
         config.duration_predictor_kernel_size = params['model']['kernel_size']
         config.duration_predictor_dropout = params['model']['p_dropout']
         config.num_hidden_layers = params['model']['n_layers']
@@ -480,6 +529,7 @@ def convert_checkpoint(
         config.num_speakers = params['data']['n_speakers']
         config.cond_layer_index = params['model'].get('cond_layer_idx', 2) if config.speaker_embedding_size > 0 else config.num_hidden_layers
         config.spectrogram_bins = params['data']['filter_length'] // 2 + 1
+        config.prior_encoder_num_flows = params['model'].get('n_flow_layer', 4)
         if sampling_rate:
             config.sampling_rate = sampling_rate
         else:
@@ -511,7 +561,10 @@ def convert_checkpoint(
     
     processor = BertVits2Processor(
         tokenizer,
-        bert_tokenizers=AutoTokenizerDict.from_pretrained(dict(zip(language, bert))),
+        bert_tokenizers={
+            lang: BertTokenizer.from_pretrained(bert_path)
+            for lang, bert_path in zip(language, bert)
+        }
     )
 
     config.vocab_size = len(symbols)
@@ -520,15 +573,19 @@ def convert_checkpoint(
     # load bert weights
     for i, bert_path in enumerate(bert):
         bert_model = BertModel.from_pretrained(bert_path)
-        model.bert_encoders[i].load_state_dict(bert_model.state_dict(), strict=False)
+        model.bert_encoders[i].load_state_dict(bert_model.state_dict(), strict=True)
 
-    # drop unsed mappings, if bert is not provided
+    # this will help to cut unused part
     if len(bert) == 1:
-        MAPPING.pop("enc_p.ja_bert_proj")
-        MAPPING.pop("enc_p.en_bert_proj")
+        IGNORE_KEYS.extend(["enc_p.ja_bert_proj", "enc_p.en_bert_proj"])
     elif len(bert) == 2:
-        MAPPING.pop("enc_p.en_bert_proj")
-
+        IGNORE_KEYS.extend(["enc_p.en_bert_proj"])
+    
+    # select flow to use
+    if config.use_transformer_flow:
+        MAPPING.update(MAPPING_TRANSFORMER_FLOW)
+    else:
+        MAPPING.update(MAPPING_RESIDUAL_FLOW)
 
     model.decoder.apply_weight_norm()
 

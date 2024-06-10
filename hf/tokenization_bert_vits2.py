@@ -33,16 +33,8 @@ VOCAB_FILES_NAMES = {
     "vocab_file": "vocab.json",
 }
 
-
-def has_non_roman_characters(input_string):
-    # Find any character outside the ASCII range
-    non_roman_pattern = re.compile(r"[^\x00-\x7F]")
-
-    # Search the input string for non-Roman characters
-    match = non_roman_pattern.search(input_string)
-    has_non_roman = match is not None
-    return has_non_roman
-
+def is_symbol(ch):
+    return ch in "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
 class BertVits2Tokenizer(PreTrainedTokenizer):
     """
@@ -80,8 +72,6 @@ class BertVits2Tokenizer(PreTrainedTokenizer):
         unk_token="<unk>",
         languages=None,
         add_blank=True,
-        normalize=True,
-        phonemize=True,
         **kwargs,
     ) -> None:
         with open(vocab_file, encoding="utf-8") as vocab_handle:
@@ -90,16 +80,12 @@ class BertVits2Tokenizer(PreTrainedTokenizer):
         self.decoder = {v: k for k, v in self.encoder.items()}
         self.languages = languages
         self.add_blank = add_blank
-        self.normalize = normalize
-        self.phonemize = phonemize
 
         super().__init__(
             pad_token=pad_token,
             unk_token=unk_token,
             languages=languages,
             add_blank=add_blank,
-            normalize=normalize,
-            phonemize=phonemize,
             **kwargs,
         )
 
@@ -112,117 +98,112 @@ class BertVits2Tokenizer(PreTrainedTokenizer):
         vocab.update(self.added_tokens_encoder)
         return vocab
 
-    def normalize_text(self, input_string):
-        """Lowercase the input string, respecting any special token ids that may be part or entirely upper-cased."""
-        all_vocabulary = list(self.encoder.keys()) + list(self.added_tokens_encoder.keys())
-        filtered_text = ""
+    def zh_g2p(self, text: str) -> Tuple[str, List[int], List[int]]:
+        """Converts a string of Chinese text into a list of phonemes and tones."""
+        from pypinyin import lazy_pinyin, Style
 
-        i = 0
-        while i < len(input_string):
-            found_match = False
-            for word in all_vocabulary:
-                if input_string[i : i + len(word)] == word:
-                    filtered_text += word
-                    i += len(word)
-                    found_match = True
-                    break
+        with open(os.path.join(os.path.dirname(__file__), "data", "zh_g2p.json"), encoding="utf-8") as f:
+            g2p = json.load(f)
 
-            if not found_match:
-                filtered_text += input_string[i].lower()
-                i += 1
+        phones = []
+        tones = []
+        word2ph = []
 
-        return filtered_text
+        initials = lazy_pinyin(text, neutral_tone_with_five=True, style=Style.INITIALS, tone_sandhi=True)
+        finals = lazy_pinyin(text, neutral_tone_with_five=True, style=Style.FINALS_TONE3, tone_sandhi=True)
 
-    def _preprocess_char(self, text):
-        """Special treatment of characters in certain languages"""
-        if self.language == "ron":
-            text = text.replace("ț", "ţ")
-        return text
+        for initial, final in zip(initials, finals):
+            tone = 0
+            if final[-1].isdigit():
+                pinyin = initial + final[:-1]
+                tone = int(final[-1])
+                if initial:
+                    pinyin = re.sub(r"uei$", "ui", pinyin)
+                    pinyin = re.sub(r"iou$", "iu", pinyin)
+                    pinyin = re.sub(r"uen$", "un", pinyin)
+                else:
+                    pinyin = re.sub(r"^ing$", "ying", pinyin)
+                    pinyin = re.sub(r"^i$", "yi", pinyin)
+                    pinyin = re.sub(r"^in$", "yin", pinyin)
+                    pinyin = re.sub(r"^u$", "wu", pinyin)
+                    pinyin = re.sub(r"^v", "yu", pinyin)
+                    pinyin = re.sub(r"^e", "e", pinyin)
+                    pinyin = re.sub(r"^i", "y", pinyin)
+                    pinyin = re.sub(r"^u", "w", pinyin)
+            else:
+                pinyin = initial + final
+            if initial == final:
+                tone = 0
+                phone = [initial]
+            else:
+                phone = g2p.get(pinyin, [self.unk_token])
+                if phone[0] == self.unk_token:
+                    tone = 0
+                    phone = [self.unk_token]
+            tones += [tone] * len(phone)
+            phones += phone
+            if initial != 'SP':
+                word2ph.append(len(phone))
+            else:
+                word2ph[-1] += 1
 
-    def prepare_for_tokenization(
-        self, text: str, is_split_into_words: bool = False, normalize: Optional[bool] = None, **kwargs
-    ) -> Tuple[str, Dict[str, Any]]:
-        """
-        Performs any necessary transformations before tokenization.
+        phones = "<|SEP|>".join(phones)
+        return phones, tones, word2ph
+            
 
-        This method should pop the arguments from kwargs and return the remaining `kwargs` as well. We test the
-        `kwargs` at the end of the encoding process to be sure all the arguments have been used.
+    def convert_g2p(self, text: str, language: str, add_special_tokens: bool) -> Tuple[str, List[int], List[int]]:
+        """Converts a string of text into a list of phonemes and tones."""
+        if not is_phonemizer_available():
+            raise ImportError("Phonemizer is not available. Please install it using `pip install phonemizer`.")
 
-        Args:
-            text (`str`):
-                The text to prepare.
-            is_split_into_words (`bool`, *optional*, defaults to `False`):
-                Whether or not the input is already pre-tokenized (e.g., split into words). If set to `True`, the
-                tokenizer assumes the input is already split into words (for instance, by splitting it on whitespace)
-                which it will tokenize.
-            normalize (`bool`, *optional*, defaults to `None`):
-                Whether or not to apply punctuation and casing normalization to the text inputs. Typically, VITS is
-                trained on lower-cased and un-punctuated text. Hence, normalization is used to ensure that the input
-                text consists only of lower-case characters.
-            kwargs (`Dict[str, Any]`, *optional*):
-                Keyword arguments to use for the tokenization.
+        if language.startswith("zh"):
+            phones, tones, word2ph = self.zh_g2p(text)
+        else:
+            raise ValueError(f"Language '{language}' not supported by VITS.")
 
-        Returns:
-            `Tuple[str, Dict[str, Any]]`: The prepared text and the unused kwargs.
-        """
-        normalize = normalize if normalize is not None else self.normalize
+        lang_ids = [self.languages.index(language)] * len(tones)
 
-        if normalize:
-            # normalise for casing
-            text = self.normalize_text(text)
+        if self.add_blank:
+            tones = self._add_blank(tones, 0)
+            lang_ids = self._add_blank(lang_ids, 0)
 
-        filtered_text = self._preprocess_char(text)
+            for i in range(len(word2ph)):
+                word2ph[i] = word2ph[i] * 2
+            word2ph[0] += 1
 
-        if has_non_roman_characters(filtered_text) and self.is_uroman:
-            logger.warning(
-                "Text to the tokenizer contains non-Roman characters. Ensure the `uroman` Romanizer is "
-                "applied to the text prior to passing it to the tokenizer. See "
-                "`https://github.com/isi-nlp/uroman` for details."
-            )
+        if add_special_tokens:
+            word2ph = [0] + word2ph + [0]
 
-        if self.phonemize:
-            if not is_phonemizer_available():
-                raise ImportError("Please install the `phonemizer` Python package to use this tokenizer.")
+        return phones, tones, lang_ids, word2ph
 
-            filtered_text = phonemizer.phonemize(
-                filtered_text,
-                language="en-us",
-                backend="espeak",
-                strip=True,
-                preserve_punctuation=True,
-                with_stress=True,
-            )
-            filtered_text = re.sub(r"\s+", " ", filtered_text)
-        elif normalize:
-            # strip any chars outside of the vocab (punctuation)
-            filtered_text = "".join(list(filter(lambda char: char in self.encoder, filtered_text))).strip()
-
-        return filtered_text, kwargs
+    def _add_blank(self, sequence: List[Union[str, int]], blank: Union[str, int]) -> List[Union[str, int]]:
+        interspersed = [blank] * (len(sequence) * 2 + 1)
+        interspersed[1::2] = sequence
+        return interspersed
 
     def _tokenize(self, text: str) -> List[str]:
         """Tokenize a string by inserting the `<pad>` token at the boundary between adjacent characters."""
         tokens = []
 
-        # greedy longest match
-        i = 0
-        while i < len(text):
-            found_match = False
-            for j in range(len(text), i, -1):
-                subword = text[i:j]
-                if subword in self.encoder:
-                    tokens.append(subword)
-                    i = j
-                    found_match = True
-                    break
-
-            if not found_match:
-                tokens.append(self.unk_token)
-                i += 1
+        if '<|SEP|>' in text:
+            tokens = text.split('<|SEP|>')
+        else: # fallback
+            i = 0
+            while i < len(text):
+                found = False
+                for j in range(min(len(text), i + 2), i, -1):
+                    subtext = text[i:j]
+                    if subtext in self.encoder:
+                        tokens.append(subtext)
+                        i = j
+                        found = True
+                        break
+                if not found:
+                    tokens.append(self.unk_token)
+                    i += 1
 
         if self.add_blank:
-            interspersed = [self._convert_id_to_token(0)] * (len(tokens) * 2 + 1)
-            interspersed[1::2] = tokens
-            tokens = interspersed
+            tokens = self._add_blank(tokens, self.pad_token)
 
         return tokens
 

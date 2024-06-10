@@ -19,6 +19,7 @@ from typing import List
 from transformers.configuration_utils import PretrainedConfig
 from transformers.utils import logging
 from transformers.models.bert.configuration_bert import BertConfig
+import copy
 
 
 logger = logging.get_logger(__name__)
@@ -190,18 +191,18 @@ class BertVits2Config(PretrainedConfig):
         duration_predictor_num_flows=4,
         duration_predictor_filter_channels=256,
         prior_encoder_num_flows=4,
+        prior_encoder_num_flows_layers=6,
         prior_encoder_num_wavenet_layers=4,
         posterior_encoder_num_wavenet_layers=16,
         wavenet_kernel_size=5,
         wavenet_dilation_rate=1,
         wavenet_dropout=0.0,
-        cond_layer_index=2,
+        conditioning_layer_index=2,
         speaking_rate=1.0,
         noise_scale=0.667,
         noise_scale_duration=0.8,
         stochastic_duration_prediction_ratio=0.0,
         sampling_rate=16_000,
-        languages = [],
         bert_configs = [],
         **kwargs,
     ):
@@ -242,18 +243,18 @@ class BertVits2Config(PretrainedConfig):
         self.duration_predictor_num_flows = duration_predictor_num_flows
         self.duration_predictor_filter_channels = duration_predictor_filter_channels
         self.prior_encoder_num_flows = prior_encoder_num_flows
+        self.prior_encoder_num_flows_layers = prior_encoder_num_flows_layers
         self.prior_encoder_num_wavenet_layers = prior_encoder_num_wavenet_layers
         self.posterior_encoder_num_wavenet_layers = posterior_encoder_num_wavenet_layers
         self.wavenet_kernel_size = wavenet_kernel_size
         self.wavenet_dilation_rate = wavenet_dilation_rate
         self.wavenet_dropout = wavenet_dropout
-        self.cond_layer_index = cond_layer_index
+        self.conditioning_layer_index = conditioning_layer_index
         self.speaking_rate = speaking_rate
         self.noise_scale = noise_scale
         self.noise_scale_duration = noise_scale_duration
         self.stochastic_duration_prediction_ratio = stochastic_duration_prediction_ratio
         self.sampling_rate = sampling_rate
-        self.languages = languages
         self.bert_configs = [BertConfig.from_dict(config) for config in bert_configs]
 
         if len(upsample_kernel_sizes) != len(upsample_rates):
@@ -263,3 +264,11 @@ class BertVits2Config(PretrainedConfig):
             )
 
         super().__init__(**kwargs)
+    
+    def to_dict(self):
+        # patch the bert_configs to be serializable
+        bert_configs = self.bert_configs.copy()
+        self.bert_configs = [config.to_dict() for config in self.bert_configs]
+        config_dict = super().to_dict()
+        self.bert_configs = bert_configs
+        return config_dict
