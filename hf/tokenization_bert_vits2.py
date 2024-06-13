@@ -70,6 +70,7 @@ class BertVits2Tokenizer(PreTrainedTokenizer):
         vocab_file,
         pad_token="<pad>",
         unk_token="<unk>",
+        space_token=None,
         languages=None,
         add_blank=True,
         **kwargs,
@@ -84,6 +85,7 @@ class BertVits2Tokenizer(PreTrainedTokenizer):
         super().__init__(
             pad_token=pad_token,
             unk_token=unk_token,
+            space_token=space_token,
             languages=languages,
             add_blank=add_blank,
             **kwargs,

@@ -2,6 +2,7 @@ from modeling_bert_vits2 import BertVits2Model
 from configuration_bert_vits2 import BertVits2Config
 from processing_bert_vits2 import BertVits2Processor
 from tokenization_bert_vits2 import BertVits2Tokenizer
+from transformers import PreTrainedTokenizerFast
 from tempfile import TemporaryDirectory
 from pathlib import Path
 import torch
@@ -16,18 +17,23 @@ processor = BertVits2Processor.from_pretrained(model_name)
 model = BertVits2Model.from_pretrained(model_name)
 
 class OnnxWrapper(torch.nn.Module):
-    def __init__(self, model):
+    def __init__(self, model, **kwargs):
         super().__init__()
         self.model = model
+        self.kwargs = kwargs
 
     def forward(self, *args, **kwargs):
+        kwargs.update(self.kwargs)
         return self.model(*args, **kwargs)["waveform"]
 
-model = OnnxWrapper(model)
+model = OnnxWrapper(model, speaker_id=0)
 
 with torch.no_grad():
     inputs = processor("你好我是愛利", language="zh", return_tensors="pt")
-    inputs = tuple([inputs[k] for k in ["input_ids", "tone_ids", "language_ids", "attention_mask", "word_to_phoneme", "bert_input_ids", "bert_attention_mask"]])
+    inputs = tuple(
+        inputs[k]
+        for k in ["input_ids", "tone_ids", "language_ids", "attention_mask", "word_to_phoneme", "bert_input_ids", "bert_attention_mask"]
+    )
     os.makedirs(save_to, exist_ok=True)
     with TemporaryDirectory() as dir:
         torch.onnx.export(

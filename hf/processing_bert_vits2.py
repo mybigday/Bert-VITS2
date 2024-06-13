@@ -35,11 +35,6 @@ TOKENIZER_MAPPING.register("bert_vits2", "BertVits2Tokenizer")
 logger = logging.get_logger(__name__)
 
 def chinese_number_to_words(text):
-    indents = [
-        "十",
-        "百",
-        "千",
-    ]
     out = ""
     if text[0] == "-":
         out += "負"
@@ -54,20 +49,46 @@ def chinese_number_to_words(text):
         for c in decimal:
             out += chinese_number_to_words(c)
         return out
+    chinese_num = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"]
+    length = len(text)
     for i, c in enumerate(text):
-        if c == ",":
-            pass
+        if c == "0" and out[-1] not in chinese_num:
+            if i != length - 1 or length == 1:
+                out += chinese_num[0]
         else:
-            if c == '0' and out[-1] in indents:
-                continue
-            if c == '1' and i == len(text) - 2 and len(text) == 2:
-                c = ""
-            if c:
-                c = "零一二三四五六七八久"[int(c)]
-            out += c
-            # add 千百十
-            if i < len(text) - 1:
-                out += indents[len(text) - i - 2]
+            out += chinese_num[int(c)]
+        if length - i == 2:
+            out += "十"
+        elif length - i == 3:
+            out += "百"
+        elif length - i == 4:
+            out += "千"
+        elif length - i == 5:
+            out += "萬"
+        elif length - i == 6:
+            out += "十"
+        elif length - i == 7:
+            out += "百"
+        elif length - i == 8:
+            out += "千"
+        elif length - i == 9:
+            out += "億"
+        elif length - i == 10:
+            out += "十"
+        elif length - i == 11:
+            out += "百"
+        elif length - i == 12:
+            out += "千"
+        elif length - i == 13:
+            out += "兆"
+        elif length - i == 14:
+            out += "十"
+        elif length - i == 15:
+            out += "百"
+        elif length - i == 16:
+            out += "千"
+        elif length - i == 17:
+            out += "京"
     return out
 
 
@@ -88,7 +109,11 @@ class BertVits2Processor(ProcessorMixin):
 
     def __init__(self, tokenizer: PreTrainedTokenizer, bert_tokenizers: Dict[str, PreTrainedTokenizer]):
         super().__init__(tokenizer)
-        self.bert_tokenizers = bert_tokenizers
+        self.__bert_tokenizers = bert_tokenizers
+
+    @property
+    def bert_tokenizers(self):
+        return self.__bert_tokenizers
 
     def preprocess_stage1(self, text, language=None):
         # normalize punctuation
@@ -181,12 +206,12 @@ class BertVits2Processor(ProcessorMixin):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
         args = cls._get_arguments_from_pretrained(pretrained_model_name_or_path, **kwargs)
-        bert_tokenizers = {
-            language: AutoTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder=f"bert_{language}")
-            for language in args[0].languages
+        processor_dict, kwargs = cls.get_processor_dict(pretrained_model_name_or_path, **kwargs)
+        processor_dict['bert_tokenizers'] = {
+            key: AutoTokenizer.from_pretrained(pretrained_model_name_or_path, subfolder=val)
+            for key, val in processor_dict['bert_tokenizers'].items()
         }
-        args.append(bert_tokenizers)
-        return cls(*args)
+        return cls.from_args_and_dict(args, processor_dict, **kwargs)
 
     def save_pretrained(
         self,
